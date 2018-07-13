@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 // reactor lives in a thread local variable. Here's where all magic happens!
 thread_local! {
-    static REACTOR: RefCell<Option<Rc<RefCell<InnerEventLoop>>>> = RefCell::new(None);
+    static REACTOR: Rc<RefCell<InnerEventLoop>> = Rc::new(RefCell::new(InnerEventLoop::new()));
 }
 
 // The Core is just a wrapper around InnerEventLoop
@@ -43,14 +43,9 @@ pub struct Core(Rc<RefCell<InnerEventLoop>>);
 impl Core {
     // Create the inner event loop and save it into thread local
     pub fn new() -> Self {
-        let inner = InnerEventLoop::new();
-        let outer = Rc::new(RefCell::new(inner));
+        let reactor = REACTOR.with(|ev| ev.clone());
 
-        REACTOR.with(|ev| {
-            std::mem::replace(&mut *ev.borrow_mut(), Some(outer.clone()));
-        });
-
-        Core(outer)
+        Core(reactor)
     }
 
     // delegate to inner loop
@@ -72,13 +67,11 @@ impl Wake for Token {
 
         // get access to the reactor by way of TLS and call wake
         REACTOR.with(|reactor| {
-            if let Some(ref reactor) = *reactor.borrow() {
-                let wakeup = Wakeup {
-                    index: idx,
-                    waker: Waker::from(Arc::clone(arc_self)),
-                };
-                reactor.borrow().wake(wakeup);
-            }
+            let wakeup = Wakeup {
+                index: idx,
+                waker: Waker::from(arc_self.clone()),
+            };
+            reactor.borrow().wake(wakeup);
         });
     }
 }
@@ -154,13 +147,7 @@ impl InnerEventLoop {
     }
 
     pub fn handle(&self) -> Handle {
-        REACTOR.with(|reactor| {
-            if let Some(ref reactor) = *reactor.borrow() {
-                Handle(Rc::clone(reactor))
-            } else {
-                panic!("reactor not running")
-            }
-        })
+        REACTOR.with(|reactor| Handle(reactor.clone()))
     }
 
     // a future calls this to register its interest
@@ -356,10 +343,8 @@ impl Drop for AsyncTcpStream {
     fn drop(&mut self) {
         REACTOR.with(|reactor| {
             let fd = self.0.as_raw_fd();
-            if let Some(ref reactor) = *reactor.borrow() {
-                reactor.borrow().remove_read_interest(fd);
-                reactor.borrow().remove_write_interest(fd);
-            }
+            reactor.borrow().remove_read_interest(fd);
+            reactor.borrow().remove_write_interest(fd);
         });
     }
 }
@@ -375,9 +360,8 @@ impl AsyncRead for AsyncTcpStream {
             Ok(len) => Ok(Async::Ready(len)),
             Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                 REACTOR.with(|reactor| {
-                    if let Some(ref reactor) = *reactor.borrow() {
-                        reactor.borrow().add_read_interest(fd, waker.clone())
-                    }
+                    let reactor = reactor.borrow();
+                    reactor.add_read_interest(fd, waker.clone())
                 });
 
                 Ok(Async::Pending)
@@ -398,9 +382,8 @@ impl AsyncWrite for AsyncTcpStream {
             Ok(len) => Ok(Async::Ready(len)),
             Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                 REACTOR.with(|reactor| {
-                    if let Some(ref reactor) = *reactor.borrow() {
-                        reactor.borrow().add_write_interest(fd, waker.clone())
-                    }
+                    let reactor = reactor.borrow();
+                    reactor.add_write_interest(fd, waker.clone())
                 });
 
                 Ok(Async::Pending)

@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["plhk"]
 
 [dependencies]
-futures = "0.2"
+futures-preview = "*"
 libc = "0.2"
 log = "0.4"
 pretty_env_logger = "0.2"

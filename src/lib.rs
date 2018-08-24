@@ -18,9 +18,10 @@ use libc::{fd_set, select, timeval, FD_ISSET, FD_SET, FD_ZERO};
 use std::os::unix::io::RawFd;
 
 use std::cell::{Cell, RefCell};
-use std::collections::{VecDeque, BTreeMap};
+use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, TryRecvError};
 
 mod async_tcp_stream;
 mod async_tcp_listener;
@@ -46,30 +47,17 @@ pub fn spawn<F: Future<Output = ()> + Send + 'static>(f: F) {
 // Our waker Token. It stores the index of the future in the wait queue
 // (see below)
 #[derive(Debug)]
-struct Token(usize);
+struct Token {
+    index: usize,
+    sender: Mutex<mpsc::Sender<Arc<Token>>>,
+}
 
 impl Wake for Token {
     fn wake(arc_self: &Arc<Token>) {
         debug!("waking {:?}", arc_self);
 
-        let Token(idx) = **arc_self;
-
-        // get access to the reactor by way of TLS and call wake
-        REACTOR.with(|reactor| {
-            let wakeup = Wakeup {
-                index: idx,
-                waker: unsafe { futures::task::local_waker(arc_self.clone()) },
-            };
-            reactor.wake(wakeup);
-        });
+        arc_self.sender.lock().unwrap().send(Arc::clone(arc_self)).unwrap();
     }
-}
-
-// Wakeup notification struct stores the index of the future in the wait queue
-// and waker
-struct Wakeup {
-    index: usize,
-    waker: LocalWaker,
 }
 
 // Task is a boxed future with Output = ()
@@ -103,17 +91,20 @@ struct EventLoop {
     write: RefCell<BTreeMap<RawFd, Waker>>,
     counter: Cell<usize>,
     wait_queue: RefCell<BTreeMap<TaskId, Task>>,
-    run_queue: RefCell<VecDeque<Wakeup>>,
+    run_rx: mpsc::Receiver<Arc<Token>>,
+    run_tx: mpsc::Sender<Arc<Token>>,
 }
 
 impl EventLoop {
     fn new() -> Self {
+        let (run_tx, run_rx) = mpsc::channel();
         EventLoop {
             read: RefCell::new(BTreeMap::new()),
             write: RefCell::new(BTreeMap::new()),
             counter: Cell::new(0),
             wait_queue: RefCell::new(BTreeMap::new()),
-            run_queue: RefCell::new(VecDeque::new()),
+            run_rx,
+            run_tx,
         }
     }
 
@@ -152,16 +143,14 @@ impl EventLoop {
         }
     }
 
-    // waker calls this to put the future on the run queue
-    fn wake(&self, wakeup: Wakeup) {
-        self.run_queue.borrow_mut().push_back(wakeup);
-    }
-
     fn next_task(&self) -> (TaskId, LocalWaker) {
-        let counter = self.counter.get();
-        let w = Arc::new(Token(counter));
-        self.counter.set(counter + 1);
-        (counter, unsafe { futures::task::local_waker(w) })
+        let index = self.counter.get();
+        let w = Arc::new(Token {
+            index,
+            sender: Mutex::new(self.run_tx.clone()),
+        });
+        self.counter.set(index + 1);
+        (index, unsafe { futures::task::local_waker(w) })
     }
 
     // create a task, poll it once and push it on wait queue
@@ -263,15 +252,27 @@ impl EventLoop {
             let mut tasks_done = Vec::new();
 
             // now pop wakeup notifications from the run queue and poll associated futures
-            while let Some(w) = self.run_queue.borrow_mut().pop_front() {
-                debug!("polling task#{}", w.index);
+            loop {
+                match self.run_rx.try_recv() {
+                    Ok(w) => {
+                        debug!("polling task#{}", w.index);
 
-                let mut handle = self.handle();
+                        let mut handle = self.handle();
 
-                // if a task returned Ready - we're done with it
-                if let Some(ref mut task) = self.wait_queue.borrow_mut().get_mut(&w.index) {
-                    if let Poll::Ready(_) = task.poll(w.waker, &mut handle) {
-                        tasks_done.push(w.index);
+                        // if a task returned Ready - we're done with it
+                        let index = w.index;
+                        if let Some(ref mut task) = self.wait_queue.borrow_mut().get_mut(&index) {
+                            let waker = unsafe { futures::task::local_waker(w) };
+                            if let Poll::Ready(_) = task.poll(waker, &mut handle) {
+                                tasks_done.push(index);
+                            }
+                        }
+                    }
+                    Err(TryRecvError::Empty) => {
+                        break;
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        unreachable!("We hold our own copy of the receiver")
                     }
                 }
             }

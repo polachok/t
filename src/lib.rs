@@ -126,9 +126,7 @@ impl EventLoop {
     fn add_read_interest(&self, fd: RawFd, waker: Waker) {
         debug!("adding read interest for {}", fd);
 
-        if !self.read.borrow().contains_key(&fd) {
-            self.read.borrow_mut().insert(fd, waker);
-        }
+        self.read.borrow_mut().insert(fd, waker);
     }
 
     fn remove_read_interest(&self, fd: RawFd) {
@@ -147,9 +145,7 @@ impl EventLoop {
     fn add_write_interest(&self, fd: RawFd, waker: Waker) {
         debug!("adding write interest for {}", fd);
 
-        if !self.write.borrow().contains_key(&fd) {
-            self.write.borrow_mut().insert(fd, waker);
-        }
+        self.write.borrow_mut().insert(fd, waker);
     }
 
     // waker calls this to put the future on the run queue

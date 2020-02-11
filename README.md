@@ -6,7 +6,7 @@
 
 This is a greatly simplified implementation
 
-- [x] [std::future::Future](https://doc.rust-lang.org/stable/std/future/trait.Future.html) compatible executor on top of select(2) event loop
+- [x] [std::future::Future](https://doc.rust-lang.org/stable/std/future/trait.Future.html) compatible executor on top of mio event loop
 - [x] AsyncRead/AsyncWrite TcpStream implementations
 
 todo:

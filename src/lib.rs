@@ -217,16 +217,12 @@ impl EventLoop {
     }
 
     // the meat of the event loop
-    // we're using select(2) because it's simple and it's portable
     pub fn run<F: Future<Output = ()> + Send + 'static>(&self, f: F) {
         self.do_spawn(f);
 
         // Create storage for events.
         let mut events = Events::with_capacity(128);
         loop {
-            debug!("select loop start");
-
-            // select will block until some event happens on the fds
             unsafe {
                 let p: *const EventLoop = self;
                 let q: *mut EventLoop = p as *mut EventLoop;
